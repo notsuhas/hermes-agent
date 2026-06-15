@@ -81,6 +81,39 @@ def test_reactions_disabled_with_no(monkeypatch):
     assert adapter._reactions_enabled() is False
 
 
+# ── _completion_reaction_mode ─────────────────────────────────────────
+
+
+def test_completion_reaction_mode_defaults_to_success_failure(monkeypatch):
+    """Completion reactions should preserve historical 👍/👎 behavior by default."""
+    monkeypatch.delenv("TELEGRAM_COMPLETION_REACTIONS", raising=False)
+    adapter = _make_adapter()
+    assert adapter._completion_reaction_mode() == "success_failure"
+
+
+@pytest.mark.parametrize("value", ["clear", "false", "off", "0", "remove"])
+def test_completion_reaction_mode_clear_aliases(monkeypatch, value):
+    """Users can opt out of final 👍/👎 and clear the temporary reaction instead."""
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", value)
+    adapter = _make_adapter()
+    assert adapter._completion_reaction_mode() == "clear"
+
+
+@pytest.mark.parametrize("value", ["success_failure", "true", "yes", "1", "final"])
+def test_completion_reaction_mode_success_aliases(monkeypatch, value):
+    """Users can explicitly opt into final success/failure reactions."""
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", value)
+    adapter = _make_adapter()
+    assert adapter._completion_reaction_mode() == "success_failure"
+
+
+def test_completion_reaction_mode_none(monkeypatch):
+    """Users can leave the in-progress reaction untouched on completion."""
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", "none")
+    adapter = _make_adapter()
+    assert adapter._completion_reaction_mode() == "none"
+
+
 # ── _set_reaction ────────────────────────────────────────────────────
 
 
@@ -175,8 +208,9 @@ async def test_on_processing_start_handles_missing_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_processing_complete_success(monkeypatch):
-    """Successful processing should set thumbs-up reaction."""
+    """Successful processing should set thumbs-up reaction by default."""
     monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    monkeypatch.delenv("TELEGRAM_COMPLETION_REACTIONS", raising=False)
     adapter = _make_adapter()
     event = _make_event()
 
@@ -191,8 +225,9 @@ async def test_on_processing_complete_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_processing_complete_failure(monkeypatch):
-    """Failed processing should set thumbs-down reaction."""
+    """Failed processing should set thumbs-down reaction by default."""
     monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    monkeypatch.delenv("TELEGRAM_COMPLETION_REACTIONS", raising=False)
     adapter = _make_adapter()
     event = _make_event()
 
@@ -203,6 +238,36 @@ async def test_on_processing_complete_failure(monkeypatch):
         message_id=456,
         reaction="\U0001f44e",
     )
+
+
+@pytest.mark.asyncio
+async def test_on_processing_complete_clear_mode(monkeypatch):
+    """Clear mode removes the temporary acknowledgement instead of final 👍/👎."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", "clear")
+    adapter = _make_adapter()
+    event = _make_event()
+
+    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+    adapter._bot.set_message_reaction.assert_awaited_once_with(
+        chat_id=123,
+        message_id=456,
+        reaction=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_processing_complete_none_mode(monkeypatch):
+    """None mode leaves the in-progress reaction unchanged."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", "none")
+    adapter = _make_adapter()
+    event = _make_event()
+
+    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+    adapter._bot.set_message_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -219,12 +284,7 @@ async def test_on_processing_complete_skipped_when_disabled(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_processing_complete_cancelled_clears_reaction(monkeypatch):
-    """Cancelled processing should clear the in-progress reaction.
-
-    Without this clear, the 👀 reaction lingers on the user's message
-    indefinitely (until another agent run swaps it for 👍/👎). On a
-    ``/stop`` that ends a session, that reaction never gets cleaned up.
-    """
+    """Cancelled processing should clear the in-progress reaction."""
     monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
     adapter = _make_adapter()
     event = _make_event()
@@ -298,6 +358,25 @@ def test_config_bridges_telegram_reactions(monkeypatch, tmp_path):
     assert os.getenv("TELEGRAM_REACTIONS") == "true"
 
 
+def test_config_bridges_telegram_completion_reactions(monkeypatch, tmp_path):
+    """gateway/config.py bridges telegram.completion_reactions to env var."""
+    import yaml
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump({
+        "telegram": {
+            "completion_reactions": "clear",
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", "")
+
+    from gateway.config import load_gateway_config
+    load_gateway_config()
+
+    import os
+    assert os.getenv("TELEGRAM_COMPLETION_REACTIONS") == "clear"
+
+
 def test_config_reactions_env_takes_precedence(monkeypatch, tmp_path):
     """Env var should take precedence over config.yaml for reactions."""
     import yaml
@@ -315,3 +394,22 @@ def test_config_reactions_env_takes_precedence(monkeypatch, tmp_path):
 
     import os
     assert os.getenv("TELEGRAM_REACTIONS") == "false"
+
+
+def test_config_completion_reactions_env_takes_precedence(monkeypatch, tmp_path):
+    """Env var should take precedence over config.yaml for completion reactions."""
+    import yaml
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump({
+        "telegram": {
+            "completion_reactions": "clear",
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_COMPLETION_REACTIONS", "success_failure")
+
+    from gateway.config import load_gateway_config
+    load_gateway_config()
+
+    import os
+    assert os.getenv("TELEGRAM_COMPLETION_REACTIONS") == "success_failure"
