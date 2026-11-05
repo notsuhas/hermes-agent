@@ -80,7 +80,11 @@ def test_archive_gate_uses_bootstrap_python_and_trusted_exact_revision():
 
 def test_scheduled_and_main_r2_consumers_skip_without_credentials():
     """Only explicit release runs may fail on missing R2; main and the nightly stay green."""
-    prune = load("canary-release.yml")["jobs"]["prune"]
+    canary = load("canary-release.yml")
+    tag_if = canary["jobs"]["tag"]["if"]
+    assert "NousResearch/hermes-agent" in tag_if
+    assert "default_branch" in tag_if
+    prune = canary["jobs"]["prune"]
     assert R2_ENV <= prune["env"].keys()
     r2_steps = [s for s in prune["steps"] if "scripts.releases.r2" in s.get("run", "")]
     assert r2_steps and all(needs_r2_credentials(s) for s in r2_steps)
